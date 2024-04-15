@@ -6,6 +6,16 @@ See LICENSE file for license details
 
 local M = {}
 
+---@class ASN1Coder
+---@operator call(table): ASN1Coder
+---@field decode fun(data: string): any
+---@field encode fun(value: any): string
+---@field extend fun(dec: fun(string): any, enc: fun(any): string): ASN1Coder
+---@field _decode fun(data: string): any
+
+---@param data string
+---@return {tag: number, len: number, total_len: number}
+---@return string
 local function split(data)
     local meta = { tag = data:byte(), len = data:byte(2) }
     local ml = 2
@@ -32,6 +42,10 @@ local function check_type(v, t)
     if vt ~= t then error('Invalid value (' .. t .. ' expected, got ' .. vt .. ')') end
 end
 
+---@param decoder fun(data: string, params: table): any
+---@param encoder fun(value: any, params: table): string
+---@param params? table
+---@return ASN1Coder
 local function define(decoder, encoder, params)
     if not params then params = {} end
 
@@ -71,6 +85,9 @@ local function define(decoder, encoder, params)
     )
 end
 
+---@param decoder fun(data: string, params: table): any
+---@param encoder fun(value: any, params: table): string
+---@return ASN1Coder
 local function define_type(decoder, encoder)
     local function tag(params)
         -- high tag numbers not supported
@@ -140,6 +157,8 @@ local function define_type(decoder, encoder)
     )
 end
 
+---@param tag number
+---@return ASN1Coder
 local function define_str(tag)
     local function identity(s) return s end
     return define_type(identity, identity) {
@@ -147,19 +166,26 @@ local function define_str(tag)
     }
 end
 
+---@param decoder fun(data: string, params: table): any
+---@param encoder fun(value: any, params: table): string
+---@return ASN1Coder
 local function define_seq(decoder, encoder)
     return define_type(decoder, encoder) {
         class = 'universal', constructed = true, tag = 0x10, value_type = 'table'
     }
 end
 
+---@param decoder fun(data: string, params: table): any
+---@param encoder fun(value: any, params: table): string
+---@return ASN1Coder
 local function define_set(decoder, encoder)
     return define_type(decoder, encoder) {
         class = 'universal', constructed = true, tag = 0x11, value_type = 'table'
     }
 end
 
-
+---@param alts {[1]: string, [2]: ASN1Coder}[]
+---@return ASN1Coder
 function M.choice(alts)
     return define(
         function(data)
@@ -184,6 +210,8 @@ function M.choice(alts)
     )
 end
 
+---@param typ ASN1Coder
+---@return ASN1Coder
 function M.optional(typ)
     return define(
         function(data)
@@ -197,6 +225,9 @@ function M.optional(typ)
     )
 end
 
+---@param typ ASN1Coder
+---@param val any
+---@return ASN1Coder
 function M.default(typ, val)
     return define(
         function(data)
@@ -222,10 +253,11 @@ M.boolean = define_type(
     function(value) return string.char(value and 0xFF or 0x00) end
 ) { class = 'universal', constructed = false, tag = 0x01, value_type = 'boolean' }
 
+local integer_mt = {__eq = function(a, b) return a.data == b.data end}
 M.integer = define_type(
     function(data)
         if #data > 6 then
-            return {type = "INTEGER", data = data}
+            return setmetatable({type = "INTEGER", data = data}, integer_mt)
         end
 
         local value = string.byte(data)
@@ -257,6 +289,7 @@ M.integer = define_type(
             table.insert(octs, 1, value % 256)
             value = math.floor(value / 256)
         end
+        if #octs == 0 then octs[1] = 0 end
         if bit32.band(octs[1], 0x80) == 0x80 then table.insert(octs, 1, 0) end
         return string.char(table.unpack(octs))
     end
@@ -359,6 +392,11 @@ M.oid = define_type(
         retval.string = table.concat(retval, ".")
         return retval
     end, function(value, params)
+        if type(value) == "string" then
+            local t = {}
+            for n in value:gmatch "%d+" do t[#t+1] = tonumber(n) end
+            value = t
+        end
         check_type(value, "table")
         local str = string.char(value[1] * 40 + value[2])
         for i = 3, #value do
@@ -412,6 +450,9 @@ M.generalized_time = define_type(
     end
 ) { class = 'universal', constructed = false, tag = 0x17 }
 
+---@param tag number
+---@param syntax ASN1Coder
+---@return ASN1Coder
 function M.explicit(tag, syntax)
     return define_type(
         function(data) return syntax.decode(data) end,
@@ -419,10 +460,15 @@ function M.explicit(tag, syntax)
     ) { class = 'context', constructed = true, tag = tag }
 end
 
+---@param tag number
+---@param syntax ASN1Coder
+---@return ASN1Coder
 function M.implicit(tag, syntax)
-    return syntax { class = 'context', constructed = true, tag = tag }
+    return syntax { class = 'context', tag = tag }
 end
 
+---@param comps {[1]: string, [2]: ASN1Coder}[]
+---@return ASN1Coder
 function M.sequence(comps)
     return define_seq(
         function(data)
@@ -433,12 +479,15 @@ function M.sequence(comps)
                     if not comp[2]._params.optional then error("Incomplete sequence") end
                 else
                     local meta = split(data)
-                    if comp[2] == M.any then value[comp[1]] = data:sub(1, meta.total_len)
-                    else value[comp[1]] = comp[2].decode(data:sub(1, meta.total_len)) end
-                    data = data:sub(meta.total_len + 1, -1)
+                    local v
+                    if comp[2] == M.any then v = data:sub(1, meta.total_len)
+                    else v = comp[2].decode(data:sub(1, meta.total_len)) end
+                    --print(v)
+                    value[comp[1]] = v
+                    if v ~= nil then data = data:sub(meta.total_len + 1, -1) end
                 end
             end
-            if data > '' then
+            if #data > 0 then
                 error('Excess data after a DER-encoded sequence')
             end
             return value
@@ -455,6 +504,8 @@ function M.sequence(comps)
     )
 end
 
+---@param comps ASN1Coder
+---@return ASN1Coder
 function M.sequence_of(comps)
     return define_seq(
         function(data)
@@ -474,6 +525,8 @@ function M.sequence_of(comps)
     )
 end
 
+---@param comps {[1]: string, [2]: ASN1Coder}[]
+---@return ASN1Coder
 function M.set(comps)
     return define_set(
         function(data)
@@ -481,9 +534,11 @@ function M.set(comps)
             for _, comp in ipairs(comps) do
                 --print(comp[1])
                 local meta = split(data)
-                if comp[2] == M.any then value[comp[1]] = data:sub(1, meta.total_len)
-                else value[comp[1]] = comp[2].decode(data:sub(1, meta.total_len)) end
-                data = data:sub(meta.total_len + 1, -1)
+                local v
+                if comp[2] == M.any then v = data:sub(1, meta.total_len)
+                else v = comp[2].decode(data:sub(1, meta.total_len)) end
+                value[comp[1]] = v
+                if v ~= nil then data = data:sub(meta.total_len + 1, -1) end
             end
             if #data > 0 then
                 error('Excess data after a DER-encoded sequence')
@@ -501,11 +556,13 @@ function M.set(comps)
     )
 end
 
+---@param comps ASN1Coder
+---@return ASN1Coder
 function M.set_of(comps)
     return define_set(
         function(data)
             local value = {}
-            while data > '' do
+            while #data > 0 do
                 local meta = split(data)
                 table.insert(value, comps.decode(data:sub(1, meta.total_len)))
                 data = data:sub(meta.total_len + 1, -1)
@@ -513,13 +570,16 @@ function M.set_of(comps)
             return value
         end,
         function(value)
-            local data = ''
-            for _, comp in ipairs(value) do data = data .. comps.encode(comp) end
-            return data
+            local enc = {}
+            for _, comp in ipairs(value) do enc[#enc+1] = comps.encode(comp) end
+            table.sort(enc)
+            return table.concat(enc)
         end
     )
 end
 
+---@param comps {[string]: {[1]: string, [2]: ASN1Coder}[]}
+---@return ASN1Coder
 function M.class(comps)
     return define_seq(
         function(data)
@@ -550,7 +610,8 @@ function M.class(comps)
         end,
         function(value)
             local data = M.oid.encode(value.type)
-            local typ = comps[value.type.string]
+            local str = type(value.type) == "string" and value.type or value.type.string
+            local typ = comps[str]
             if typ == nil then error("Unknown type for class") end
             for _, comp in ipairs(typ) do
                 --print(comp[1])
