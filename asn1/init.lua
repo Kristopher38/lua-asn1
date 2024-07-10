@@ -4,6 +4,8 @@ Copyright (c) 2015-2018 Kaarle Ritvanen
 See LICENSE file for license details
 --]]
 
+local bit32 = require("bit32")
+
 local M = {}
 
 ---@class ASN1Coder

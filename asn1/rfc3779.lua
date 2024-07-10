@@ -3,6 +3,7 @@ Copyright (c) 2015 Kaarle Ritvanen
 See LICENSE file for license details
 --]]
 
+local bit32 = require("bit32")
 local asn1 = require('asn1')
 local stringy = require('stringy')
 
