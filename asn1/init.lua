@@ -446,9 +446,9 @@ M.generalized_time = define_type(
         return {type = "GeneralizedTime", year = y, month = M, day = d, hour = h, min = m, sec = s, offset = tz}
     end,
     function(value, params)
-        return ("%04d%02d%02d%02d%02d%02d%Z"):format(value.year % 100, value.month, value.day, value.hour, value.min, value.sec or 0, value.offset)
+        return ("%04d%02d%02d%02d%02d%02dZ"):format(value.year, value.month, value.day, value.hour, value.min, value.sec or 0, value.offset)
     end
-) { class = 'universal', constructed = false, tag = 0x17 }
+) { class = 'universal', constructed = false, tag = 0x18 }
 
 ---@param tag number
 ---@param syntax ASN1Coder
